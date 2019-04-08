@@ -1,137 +1,232 @@
 import discord
 from discord.ext import commands
-import datetime
-import time
-import random
-import asyncio
-import json
-import requests
-import os
+from cogs.utils.checks import get_user
 
-class Moderation:
+
+'''Module for moderator commands.'''
+
+
+class Mod:
 
     def __init__(self, bot):
-            self.bot = bot
+        self.bot = bot
 
+    def are_overwrites_empty(self, overwrites):
+        """There is currently no cleaner way to check if a
+        PermissionOverwrite object is empty"""
+        original = [p for p in iter(overwrites)]
+        empty = [p for p in iter(discord.PermissionOverwrite())]
+        return original == empty
 
     @commands.command(pass_context=True)
-    async def kick(self, ctx, member : discord.Member):
-            '''Kick someone from the server.'''
+    async def kick(self, ctx, user, *, reason=""):
+        """Kicks a user (if you have the permission)."""
+        user = get_user(ctx.message, user)
+        if user:
             try:
-                await self.bot.kick(member)
-                await self.bot.edit_message(ctx.message, 'Kicked {} from the server.'.format(member))
-            except:
-                await self.bot.edit_message(ctx.message, 'You dont have the permission to kick members.')
-                await asyncio.sleep(5)
-                await self.bot.delete_message(ctx.message)
+                await user.kick(reason=reason)
+                return_msg = "Kicked user `{}`".format(user.mention)
+                if reason:
+                    return_msg += " for reason `{}`".format(reason)
+                return_msg += "."
+                await ctx.message.edit(content=self.bot.bot_prefix + return_msg)
+            except discord.Forbidden:
+                await ctx.message.edit(content=self.bot.bot_prefix + 'Could not kick user. Not enough permissions.')
+        else:
+            return await ctx.message.edit(content=self.bot.bot_prefix + 'Could not find user.')
+
+
+    # TODO: Add reason with ban
+    @commands.command(aliases=['hban'], pass_context=True)     
+    async def hackban(self, ctx, user_id: int):
+        """Bans a user outside of the server."""
+        author = ctx.message.author
+        guild = author.guild
+
+        user = guild.get_member(user_id)
+        if user is not None:
+            return await ctx.invoke(self.ban, user=user)
+
+        try:
+            await self.bot.http.ban(user_id, guild.id, 0)
+            await ctx.message.edit(content=self.bot.bot_prefix + 'Banned user: %s' % user_id)
+        except discord.NotFound:
+            await ctx.message.edit(content=self.bot.bot_prefix + 'Could not find user. '
+                               'Invalid user ID was provided.')
+        except discord.errors.Forbidden:
+            await ctx.message.edit(content=self.bot.bot_prefix + 'Could not ban user. Not enough permissions.')
+
 
     @commands.command(pass_context=True)
-    async def ban(self, ctx, member : discord.Member):
-            '''Ban someone from the server.'''
+    async def ban(self, ctx, user, *, reason=""):
+        """Bans a user (if you have the permission)."""
+        user = get_user(ctx.message, user)
+        if user:
             try:
-                await self.bot.ban(member)
-                await self.bot.edit_message(ctx.message, 'Banned {} from the server.'.format(member))
-            except:
-                await self.bot.edit_message(ctx.message, 'You dont have the permission to ban members.')
-                await asyncio.sleep(5)
-                await self.bot.delete_message(ctx.message)
+                await user.ban(reason=reason)
+                return_msg = "Banned user `{}`".format(user.mention)
+                if reason:
+                    return_msg += " for reason `{}`".format(reason)
+                return_msg += "."
+                await ctx.message.edit(content=self.bot.bot_prefix + return_msg)
+            except discord.Forbidden:
+                await ctx.message.edit(content=self.bot.bot_prefix + 'Could not ban user. Not enough permissions.')
+        else:
+            return await ctx.message.edit(content=self.bot.bot_prefix + 'Could not find user.')
 
-    @commands.command(pass_context=True)
-    async def softban(self,ctx, member : discord.Member):
-        '''Kick someone out and delete their messages.'''
-        try:
-            await self.bot.ban(member)
-            await self.bot.unban(member.server, member)
-            await self.bot.edit_message(ctx.message, 'Soft-banned {}.'.format(member))
-        except:
-        	await self.bot.edit_message(ctx.message, 'You dont have the permission to ban members.')
-        	await asyncio.sleep(5)
-        	await self.bot.delete_message(ctx.message)
+    @commands.command(aliases=['sban'], pass_context=True)
+    async def softban(self, ctx, user, *, reason=""):
+        """Bans and unbans a user (if you have the permission)."""
+        user = get_user(ctx.message, user)
+        if user:
+            try:
+                await user.ban(reason=reason)
+                await ctx.guild.unban(user)
+                return_msg = "Banned and unbanned user `{}`".format(user.mention)
+                if reason:
+                    return_msg += " for reason `{}`".format(reason)
+                return_msg += "."
+                await ctx.message.edit(content=self.bot.bot_prefix + return_msg)
+            except discord.Forbidden:
+                await ctx.message.edit(content=self.bot.bot_prefix + 'Could not softban user. Not enough permissions.')
+        else:
+            return await ctx.message.edit(content=self.bot.bot_prefix + 'Could not find user.')
 
+    @commands.group(pass_context=True, no_pm=True)
+    async def mute(self, ctx, *, user: str):
+        """Chat mutes a user (if you have the permission)."""
+        if ctx.invoked_subcommand is None:
+            user = get_user(ctx.message, user)
+            if user and user != self.bot.user:
+                failed = []
+                channel_length = 0
+                for channel in ctx.message.guild.channels:
+                    if type(channel) != discord.channel.TextChannel:
+                        continue
+                    overwrites = channel.overwrites_for(user)
+                    overwrites.send_messages = False
+                    channel_length += 1
+                    try:
+                        await channel.set_permissions(user, overwrite=overwrites)
+                    except discord.Forbidden:
+                        failed.append(channel)
+                if failed and len(failed) < channel_length:
+                    await ctx.message.edit(content=self.bot.bot_prefix + "Muted user in {}/{} channels: {}".format(channel_length - len(failed), channel_length, user.mention))
+                elif failed:
+                    await ctx.message.edit(content=self.bot.bot_prefix + "Failed to mute user. Not enough permissions.")
+                else:
+                    await ctx.message.edit(content=self.bot.bot_prefix + 'Muted user: %s' % user.mention)
+            else:
+                await ctx.message.edit(content=self.bot.bot_prefix + 'Could not find user.')
 
-    def find_user(self, bans, member): 
-            return [user for user in bans if user.id == member or user.name.lower() == member.lower()]
+    @mute.command(pass_context=True, no_pm=True)
+    async def channel(self, ctx, *, user: str):
+        user = get_user(ctx.message, user)
+        if user:
+            overwrites = ctx.message.channel.overwrites_for(user)
+            overwrites.send_messages = False
+            try:
+                ctx.message.channel.set_permissions(user, overwrite=overwrites)
+                await ctx.message.edit(content=self.bot.bot_prefix + 'Muted user in this channel: %s' % user.mention)
+            except discord.Forbidden:
+                await ctx.message.edit(content=self.bot.bot_prefix + 'Unable to mute user. Not enough permissions.')
+        else:
+            await ctx.message.edit(content=self.bot.bot_prefix + 'Could not find user.')
 
-    async def _unban(self, ctx, server, user):
-    	try:
-    		await self.bot.unban(server, user)
-    		await self.bot.edit_message(ctx.message, 'Unbanned {} from the server.'.format(user))
-    	except:
-    		await self.bot.edit_message(ctx.message, 'You dont have the permission to un-ban members.')
-    		await asyncio.sleep(5)
-    		await self.bot.delete_message(ctx.message)
+    @commands.group(pass_context=True, no_pm=True)
+    async def unmute(self, ctx, *, user: str):
+        """Unmutes a user (if you have the permission)."""
+        if ctx.invoked_subcommand is None:
+            user = get_user(ctx.message, user)
+            if user:
+                failed = []
+                channel_length = 0
+                for channel in ctx.message.guild.channels:
+                    if type(channel) != discord.channel.TextChannel:
+                        continue
+                    overwrites = channel.overwrites_for(user)
+                    overwrites.send_messages = None
+                    channel_length += 1
+                    is_empty = self.are_overwrites_empty(overwrites)
+                    try:
+                        if not is_empty:
+                            await channel.set_permissions(user, overwrite=overwrites)
+                        else:
+                            await channel.set_permissions(user, overwrite=None)
+                        await channel.set_permissions(user, overwrite=overwrites)
+                    except discord.Forbidden:
+                        failed.append(channel)
+                if failed and len(failed) < channel_length:
+                    await ctx.message.edit(content=self.bot.bot_prefix + "Unmuted user in {}/{} channels: {}".format(channel_length - len(failed), channel_length, user.mention))
+                elif failed:
+                    await ctx.message.edit(content=self.bot.bot_prefix + "Failed to unmute user. Not enough permissions.")
+                else:
+                    await ctx.message.edit(content=self.bot.bot_prefix + 'Unmuted user: %s' % user.mention)
+            else:
+                await ctx.message.edit(content=self.bot.bot_prefix + 'Could not find user.')
 
-    @commands.command(pass_context=True)
-    async def unban(self, ctx, member : str):
-        '''Unban someone using their user ID or name.'''
-        server = ctx.message.server
-        try:
-            bans = await self.bot.get_bans(server)
-        except:
-            await self.bot.edit_message(ctx.message, 'You dont have the permission to see the bans.')
-            await asyncio.sleep(5)
-            await self.bot.delete_message(ctx.message)
-            return
+    @unmute.command(pass_context=True, no_pm=True)
+    async def channel(self, ctx, *, user: str):
+        user = get_user(ctx.message, user)
+        if user:
+            overwrites = ctx.message.channel.overwrites_for(user)
+            is_empty = self.are_overwrites_empty(overwrites)
+            try:
+                if not is_empty:
+                    ctx.message.channel.set_permissions(user, overwrite=overwrites)
+                else:
+                    await channel.set_permissions(user, overwrite=None)
+                await channel.set_permissions(user, overwrite=overwrites)
+                await ctx.message.edit(content=self.bot.bot_prefix + 'Unmuted user in this channel: %s' % user.mention)
+            except discord.Forbidden:
+                await ctx.message.edit(content=self.bot.bot_prefix + 'Unable to unmute user. Not enough permissions.')
+        else:
+            await ctx.message.edit(content=self.bot.bot_prefix + 'Could not find user.')
 
-        users = self.find_user(bans, member)
-        print(users)
-        print([user.name for user in bans])
+    @commands.has_permissions(manage_messages=True)
+    @commands.command(aliases=['p'], pass_context=True, no_pm=True)
+    async def purge(self, ctx, msgs: int, members="everyone", *, txt=None):
+        """Purge last n messages or nmessages with a word. Requires Manage Messages permission. [p]help purge for more info.
+        
+        Ex:
+        
+        [p]purge 20 - deletes the last 20 messages in a channel sent by anyone.
+        [p]purge 20 everyone stuff - deletes any messages in the last 20 messages that contain the word 'stuff'.
+        [p]purge 20 @appu1232 - deletes any messages in the last 20 messages that were sent by appu1232.
+        [p]purge 20 "@appu1232, LyricLy, 435254873976547426" hello - deletes any messages in the last 20 messages that were sent by appu1232, LyricLy or thecommondude that contain the word 'stuff'.
+        """
+        await ctx.message.delete()
+        member_object_list = []
+        if members != "everyone":
+            member_list = [x.strip() for x in members.split(",")]
+            for member in member_list:
+                if "@" in member:
+                    member = member[3 if "!" in member else 2:-1]
+                if member.isdigit():
+                    member_object = ctx.guild.get_member(int(member))
+                else:
+                    member_object = ctx.guild.get_member_named(member)
+                if not member_object:
+                    return await ctx.send(self.bot.bot_prefix + "Invalid user.")
+                else:
+                    member_object_list.append(member_object)
 
-        if len(users) > 1:
-        	return await self.bot.edit_message(ctx.message, 'Multiple users found.')
-        if len(users) < 1:
-        	return await self.bot.edit_message(ctx.message, 'User not found.')
-
-
-        await self._unban(ctx, server, users[0])
-
-    @commands.command(pass_context=True)
-    async def bans(self, ctx):
-    	'''See a list of banned users.'''
-    	server = ctx.message.server
-    	server = ctx.message.server
-    	try:
-    		bans = await self.bot.get_bans(server)
-    	except:
-    		await self.bot.edit_message(ctx.message, 'You dont have the permission to see the bans.')
-    		await asyncio.sleep(5)
-    		await self.bot.delete_message(ctx.message)
-    	else:
-    		await self.bot.edit_message(ctx.message,'**List of banned users:**```bf\n{}\n```'.format(', '.join([str(u) for u in bans])))
-
-    @commands.command(aliases=['p'], pass_context=True)
-    async def purge(self, ctx, msgs: int, *, txt=None):
-        '''Purge messages if you have the perms.'''
-        await self.bot.delete_message(ctx.message)
         if msgs < 10000:
-            async for message in self.bot.logs_from(ctx.message.channel, limit=msgs):
+            async for message in ctx.message.channel.history(limit=msgs):
                 try:
                     if txt:
-                        if txt.lower() in message.content.lower():
-                            await self.bot.delete_message(message)
-                    else:
-                        await self.bot.delete_message(message)
-                except:
-                    pass
-        else:
-            await self.bot.send_message(ctx.message.channel, 'Too many messages to delete. Enter a number < 10000')
+                        if not txt.lower() in message.content.lower():
+                            continue
+                    if member_object_list:
+                        if not message.author in member_object_list:
+                            continue
 
-
-    @commands.command(aliases=['c'], pass_context=True)
-    async def clean(self, ctx, msgs: int = 100):
-        '''Shortcust to clean all your messages.'''
-        await self.bot.delete_message(ctx.message)
-        if msgs < 10000:
-            async for message in self.bot.logs_from(ctx.message.channel, limit=msgs):
-                try:
-                    if message.author == self.bot.user:
-                        await self.bot.delete_message(message)
-                except:
-                    pass
+                    await message.delete()
+                except discord.Forbidden:
+                    await ctx.send(self.bot.bot_prefix + "You do not have permission to delete other users' messages. Use {}delete instead to delete your own messages.".format(self.bot.cmd_prefix))
         else:
-            await self.bot.send_message(ctx.message.channel, 'Too many messages to delete. Enter a number < 10000')
-        
+            await ctx.send(self.bot.bot_prefix + 'Too many messages to delete. Enter a number < 10000')
 
 
 def setup(bot):
-        bot.add_cog(Moderation(bot))
+    bot.add_cog(Mod(bot))
